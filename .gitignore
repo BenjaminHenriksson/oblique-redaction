@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local data — never commit site polygons, imagery, point clouds, or vector data
+*.geojson
+*.las
+*.laz
+*.tif
+*.tiff
+*.gpkg
+data/
+
+# Camera-sanity overlays
+/tmp/aerial_redaction_camera_check/
+
+# Local-only example stem file
+example_image.txt

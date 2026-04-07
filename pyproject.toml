@@ -1,0 +1,28 @@
+[project]
+name = "oblique-redaction"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "BenjaminHenriksson", email = "173681511+BenjaminHenriksson@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "embreex>=2.17.7.post7",
+    "laspy[lazrs]>=2.7.0",
+    "numpy>=2.4.4",
+    "pillow>=12.2.0",
+    "pyogrio>=0.12.1",
+    "pyproj>=3.7.2",
+    "rasterio>=1.5.0",
+    "scipy>=1.17.1",
+    "shapely>=2.1.2",
+    "tifffile>=2026.3.3",
+    "trimesh>=4.11.5",
+]
+
+[project.scripts]
+oblique-redact = "oblique_redaction.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.24,<0.10.0"]
+build-backend = "uv_build"
