@@ -1,7 +1,9 @@
 [project]
 name = "oblique-redaction"
 version = "0.1.0"
-description = "Add your description here"
+description = "Redact sensitive sites in oblique/nadir aerial imagery with occlusion-correct masking."
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "BenjaminHenriksson", email = "173681511+BenjaminHenriksson@users.noreply.github.com" }
 ]
