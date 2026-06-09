@@ -332,8 +332,11 @@ lower edge tracks the ground in front of the building, and behind the building
 - **No overhang handling** — the 2.5D TIN can't model balconies/cantilevers.
   Central Stockholm urban scenes have basically none, and the user explicitly
   deferred this kind of edge case.
-- **No multi-image batching** — single-image CLI; functions are written so a
-  thin loop can wrap them when a corrected `footprints.geojson` is available.
+- **No image↔AOI pre-filtering** — `redact_images` loops a directory of images
+  against a list of AOIs (one scene built per AOI, reused across all images; AOIs
+  never merged), but it still opens every image and builds its camera to test
+  visibility rather than consulting a precomputed footprints index. Fine for dozens
+  to a few hundred images; the footprints-index optimisation is in the scaling doc.
 - **No semantic understanding of the AOI** — we don't know it's a building or
   a courtyard or empty land. We don't need to know: the geometry test handles
   it uniformly.

@@ -76,6 +76,18 @@ uv run oblique-redact \
   --eo      /path/to/EO.txt \
   --las-dir /path/to/las_tiles/ \
   --out     /tmp/redacted.tif
+
+# Redact a whole directory of images against many AOIs at once.
+# --image is a directory → every *.tif/*.tiff is processed; --out is a directory
+# (outputs are named <stem>_redacted.tif). --polygon may hold many features; each
+# is an independent AOI (they are NOT merged) and every AOI visible in an image is
+# redacted into that one output.
+uv run oblique-redact \
+  --image   /path/to/images_dir/ \
+  --polygon /path/to/sites.geojson \
+  --eo      /path/to/EO_total.txt \
+  --las-dir /path/to/las_tiles/ \
+  --out     /path/to/out_dir/
 ```
 
 Outputs (next to `--out`):
@@ -88,11 +100,11 @@ CLI options:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--image` | required | Source TIFF (UltraCam Lvl-3) |
-| `--polygon` | required | Site polygon GeoJSON in WGS84 |
+| `--image` | required | Source TIFF (UltraCam Lvl-3), **or a directory of TIFFs** to batch |
+| `--polygon` | required | AOI GeoJSON in WGS84; one or many features (each an independent AOI, not merged) |
 | `--eo` | required | Terratec EO file (`EO_total.txt` or per-camera) |
 | `--las-dir` | required | Directory of LAS tiles in EPSG:3011 |
-| `--out` | required | Output GeoTIFF path |
+| `--out` | required | Output GeoTIFF path (single image) or output directory (image directory) |
 | `--voxel-size` | `1.0` | TIN xy voxel size in metres |
 | `--buffer` | `200.0` | LAS clip buffer around AOI in metres |
 | `--pixelate-factor` | `12` | Pixelate downsample factor inside the mask |
@@ -186,8 +198,14 @@ This is **v1**. It works correctly on Vexcel UltraCam Osprey Cam6L oblique
 imagery from Stockholm/Kista 2021, processed with Terratec TerraPos EO. It's
 deliberately not over-engineered for cases not yet observed:
 
-- **Single image, single polygon** per CLI invocation. Functions are written so
-  batching wraps trivially, but the CLI doesn't loop yet.
+- **Batch is a simple loop, not a scheduler.** Point `--image` at a directory to
+  process every TIFF, and `--polygon` may carry many AOIs. One scene (LiDAR clip +
+  TIN) is built per AOI and reused across all images; AOIs are kept separate (never
+  merged into one giant footprint), images are processed one at a time, and an image
+  with no visible AOI is skipped. It does **not** yet pre-filter which images see
+  which AOI (every image is opened and its camera built) — fine for dozens to a few
+  hundred images, see [docs/scaling-and-future.md](docs/scaling-and-future.md) for
+  the city-scale plan.
 - **No lens distortion correction.** UltraCam is a metric camera and the Lvl-3
   product is corrected upstream. Other cameras will likely need a Brown-Conrady
   distortion model added.

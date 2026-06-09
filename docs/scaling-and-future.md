@@ -67,10 +67,13 @@ vendor-agnostic, scale-agnostic. The plumbing around it is what needs care.
 - **Lower-altitude cameras.** See [§ Low-altitude cameras](#low-altitude-cameras)
   below.
 
-- **Multi-image batching.** The current CLI is single-image. A loop wrapping
-  `redact_image` is trivial, but to filter "which images see this AOI?" you
-  need a *correct* image footprints file. That regeneration is its own task —
-  the projection code we have can produce one as a by-product.
+- **Multi-image batching.** Done at the loop level: `redact_images` takes a
+  directory of images and a list of AOIs, builds one scene per AOI (reused across
+  all images, never merged), and redacts every visible AOI into each image. What's
+  *not* done is pre-filtering "which images see this AOI?" — every image is still
+  opened and its camera built to test visibility. Doing that cheaply needs a
+  *correct* image footprints file; the projection code here can produce one as a
+  by-product, which is the next step before true city scale.
 
 - **Genuine 3D scenes (overhangs, bridges, multi-storey atria).** The 2.5 D
   Delaunay can't represent these. Central Stockholm doesn't have many — but

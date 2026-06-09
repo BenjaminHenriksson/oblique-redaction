@@ -62,15 +62,15 @@ class _Step:
         self.start = time.monotonic()
         self._last_tick = self.start
         suffix = f" (n={self.total:,})" if self.total else ""
-        log.info(f"\u25b6 {self.name}{suffix}")
+        log.info(f"▶ {self.name}{suffix}")
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         dt = time.monotonic() - self.start
         if exc_type is None:
-            log.info(f"\u2713 {self.name} ({dt:.2f}s)")
+            log.info(f"✓ {self.name} ({dt:.2f}s)")
         else:
-            log.error(f"\u2717 {self.name} ({dt:.2f}s) \u2014 {exc_type.__name__}: {exc}")
+            log.error(f"✗ {self.name} ({dt:.2f}s) — {exc_type.__name__}: {exc}")
 
     def tick(self, done: int, msg: str = "") -> None:
         """Throttled progress line. Calls more often than ~1 Hz are dropped."""
@@ -79,17 +79,17 @@ class _Step:
             return
         self._last_tick = now
         elapsed = now - self.start
-        suffix = f" \u2014 {msg}" if msg else ""
+        suffix = f" — {msg}" if msg else ""
         if self.total and done > 0:
             rate = done / elapsed
             eta = (self.total - done) / rate if rate > 0 else 0.0
             pct = 100.0 * done / self.total
             log.info(
-                f"  \u00b7 {self.name}: {done:,}/{self.total:,} ({pct:.1f}%) "
+                f"  · {self.name}: {done:,}/{self.total:,} ({pct:.1f}%) "
                 f"@ {rate:,.0f}/s, eta {eta:.1f}s{suffix}"
             )
         else:
-            log.info(f"  \u00b7 {self.name}: {done:,}{suffix}")
+            log.info(f"  · {self.name}: {done:,}{suffix}")
 
 
 def step(name: str, total: Optional[int] = None) -> _Step:

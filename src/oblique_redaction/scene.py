@@ -157,7 +157,7 @@ def voxel_downsample_max_z(points: np.ndarray, voxel_xy: float) -> np.ndarray:
         first_in_group[0] = True
         first_in_group[1:] = sorted_keys[1:] != sorted_keys[:-1]
         kept = points[order[first_in_group]]
-        log.info(f"  · downsampled {len(points):,} \u2192 {len(kept):,} points")
+        log.info(f"  · downsampled {len(points):,} → {len(kept):,} points")
     return kept
 
 
@@ -184,7 +184,7 @@ def build_tin(
         # centroid xy of each triangle, then vectorised contains_xy from shapely 2.x
         centroids_xy = points[faces, :2].mean(axis=1)   # (F, 2)
         sens = shapely.contains_xy(polygon, centroids_xy[:, 0], centroids_xy[:, 1])
-    log.info(f"  \u00b7 {int(sens.sum()):,} sensitive triangles")
+    log.info(f"  · {int(sens.sum()):,} sensitive triangles")
     return mesh, sens
 
 
@@ -207,11 +207,11 @@ def build_scene(
         pmaxx + buffer_m,
         pmaxy + buffer_m,
     )
-    log.info(f"scene bbox (AOI \u2295 {buffer_m:g} m): {bbox}")
+    log.info(f"scene bbox (AOI ⊕ {buffer_m:g} m): {bbox}")
 
     with step("Selecting LAS tiles"):
         tile_paths = find_tiles_intersecting_bbox(las_dir, bbox)
-        log.info(f"  \u2192 {len(tile_paths)} tile(s): {[p.name for p in tile_paths]}")
+        log.info(f"  → {len(tile_paths)} tile(s): {[p.name for p in tile_paths]}")
     if not tile_paths:
         raise RuntimeError(f"no LAS tiles in {las_dir} intersect {bbox}")
 

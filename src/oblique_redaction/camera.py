@@ -240,11 +240,11 @@ def build_camera(tiff_path: Path, eo_path: Path,
 
     log.info(
         f"camera: stem={eo.image_stem} pos=({C[0]:.2f}, {C[1]:.2f}, {C[2]:.2f}) "
-        f"\u03c9={eo.omega:.4f}\u00b0 \u03c6={eo.phi:.4f}\u00b0 \u03ba={eo.kappa:.4f}\u00b0 "
+        f"ω={eo.omega:.4f}° φ={eo.phi:.4f}° κ={eo.kappa:.4f}° "
         f"conv={rotation_convention}"
     )
     log.info(
         f"intrinsics: f={intr.f_px:.1f}px pp=({intr.u_pp:.1f}, {intr.v_pp:.1f}) "
-        f"image={intr.width}\u00d7{intr.height}"
+        f"image={intr.width}×{intr.height}"
     )
     return Camera(intrinsics=intr, R_world_to_cam=R_w_to_cv, C_world=C)

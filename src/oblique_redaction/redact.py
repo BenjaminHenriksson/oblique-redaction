@@ -191,7 +191,7 @@ def write_geotiff(
     Source is a multi-band uint8 TIFF (the UltraCam Level-3 product) without GCPs/CRS;
     we preserve `tags` (including ImageDescription) and tiling layout.
     """
-    with step(f"Writing GeoTIFF \u2192 {out_path}"):
+    with step(f"Writing GeoTIFF → {out_path}"):
         with rasterio.open(src_path) as src:
             profile = src.profile.copy()
             tags_default = src.tags()
@@ -217,7 +217,7 @@ def write_mask_tif(
     mask: np.ndarray,
     out_path: Path,
 ) -> None:
-    with step(f"Writing mask TIFF \u2192 {out_path}"):
+    with step(f"Writing mask TIFF → {out_path}"):
         with rasterio.open(src_path) as src:
             profile = src.profile.copy()
         profile.update(count=1, dtype=rasterio.uint8, photometric="minisblack",
@@ -236,7 +236,7 @@ def write_debug_overlay(
     max_dim: int = 1600,
 ) -> None:
     """Save a downsampled crop around the bbox with the mask outlined for inspection."""
-    with step(f"Writing debug overlay \u2192 {out_path}"):
+    with step(f"Writing debug overlay → {out_path}"):
         u0, v0, u1, v1 = bbox_uv
         # generous padding around bbox so user can see the surrounding context
         pad = max(80, (u1 - u0) // 2, (v1 - v0) // 2)
@@ -280,6 +280,156 @@ def write_debug_overlay(
 # Top-level entrypoint
 # ---------------------------------------------------------------------------
 
+def _redact_one_image(
+    image_path: Path,
+    eo_path: Path,
+    polygons: list[Polygon],
+    scenes: list[SceneMesh],
+    out_path: Path,
+    *,
+    pixelate_factor: int = 12,
+    blur_sigma: float = 8.0,
+    rotation_convention: str | None = None,
+) -> RedactionResult | None:
+    """Redact every AOI that is visible in one image, writing a single output.
+
+    `polygons` and `scenes` are parallel lists — one prebuilt scene per AOI. AOIs that
+    do not project into this image are skipped. Returns None if no AOI is visible (so the
+    caller can skip writing an untouched copy).
+    """
+    log.info("=" * 60)
+    log.info(f"Aerial redaction: {image_path.name} ({len(polygons)} AOI(s))")
+    log.info("=" * 60)
+
+    cam_kwargs = {} if rotation_convention is None else {"rotation_convention": rotation_convention}
+    with step("Build camera"):
+        camera = build_camera(image_path, eo_path, **cam_kwargs)
+
+    # Per-AOI screen bbox + mask. Each scene is independent (AOIs are not merged), so its
+    # z-range and screen bbox stay tight to that one site.
+    masks: list[tuple[np.ndarray, tuple[int, int, int, int]]] = []
+    for i, (polygon, scene) in enumerate(zip(polygons, scenes)):
+        z_min = float(scene.mesh.vertices[:, 2].min())
+        z_max = float(scene.mesh.vertices[:, 2].max())
+        try:
+            bbox_uv = aoi_screen_bbox(camera, polygon, z_min, z_max, pad_px=16)
+        except RuntimeError as e:
+            log.info(f"  · AOI {i}: not visible in {image_path.name} ({e})")
+            continue
+        u0, v0, u1, v1 = bbox_uv
+        log.info(f"  · AOI {i}: bbox u[{u0}..{u1}] v[{v0}..{v1}] = {u1 - u0}×{v1 - v0} px")
+        mask = compute_mask(camera, scene, bbox_uv)
+        if int(mask.sum()) > 0:
+            masks.append((mask, bbox_uv))
+
+    if not masks:
+        log.info(f"no AOI visible in {image_path.name}; nothing written")
+        return None
+
+    with step("Reading source image"):
+        with rasterio.open(image_path) as src:
+            arr = src.read()
+        image_np = np.transpose(arr, (1, 2, 0))   # → (H, W, bands)
+
+    # Composite each AOI's redaction into the frame; OR the masks for the side outputs.
+    combined = np.zeros(image_np.shape[:2], dtype=np.uint8)
+    for mask, bbox_uv in masks:
+        image_np = apply_redaction(
+            image_np, mask, bbox_uv,
+            pixelate_factor=pixelate_factor,
+            blur_sigma=blur_sigma,
+        )
+        combined |= mask
+    n_masked = int(combined.sum())
+    log.info(f"mask: {n_masked:,} pixels marked across {len(masks)} visible AOI(s)")
+
+    # union bbox of all redacted AOIs — used only for the mask/debug side outputs
+    union_bbox = (
+        min(b[0] for _, b in masks),
+        min(b[1] for _, b in masks),
+        max(b[2] for _, b in masks),
+        max(b[3] for _, b in masks),
+    )
+
+    write_geotiff(image_path, out_path, image_np)
+    mask_path = out_path.with_name(out_path.stem + "_mask.tif")
+    write_mask_tif(image_path, combined, mask_path)
+    debug_path = out_path.with_name(out_path.stem + "_debug.png")
+    write_debug_overlay(image_np, combined, union_bbox, debug_path)
+
+    log.info(f"Done. {out_path}  (mask: {mask_path}, debug: {debug_path})")
+    return RedactionResult(
+        out_path=out_path,
+        mask_path=mask_path,
+        debug_path=debug_path,
+        n_pixels_masked=n_masked,
+        bbox_uv=union_bbox,
+    )
+
+
+def redact_images(
+    image_paths: list[Path],
+    out_paths: list[Path],
+    polygons: list[Polygon],
+    eo_path: Path,
+    las_dir: Path,
+    *,
+    voxel_size_m: float = 1.0,
+    buffer_m: float = 200.0,
+    pixelate_factor: int = 12,
+    blur_sigma: float = 8.0,
+    rotation_convention: str | None = None,
+) -> list[RedactionResult]:
+    """Redact a set of images against a set of AOIs (all in EPSG:3011).
+
+    One scene (LiDAR clip + TIN + BVH) is built per AOI and reused across every image —
+    AOIs are NOT merged, so each scene stays tight to its own site. Images are processed
+    one at a time (only one full frame resident at once). An image with no visible AOI is
+    skipped; a single failing image or out-of-coverage AOI is logged and skipped rather
+    than aborting the batch.
+
+    `image_paths` and `out_paths` are parallel lists.
+    """
+    if len(image_paths) != len(out_paths):
+        raise ValueError("image_paths and out_paths must be the same length")
+
+    # Build one scene per AOI, once, reused for every image.
+    scenes: list[SceneMesh] = []
+    kept_polygons: list[Polygon] = []
+    for i, polygon in enumerate(polygons):
+        try:
+            with step(f"Building scene for AOI {i} (bounds {polygon.bounds})"):
+                scene = build_scene(las_dir, polygon, voxel_size_m=voxel_size_m, buffer_m=buffer_m)
+        except RuntimeError as e:
+            log.warning(f"AOI {i}: scene build failed ({e}); skipping this AOI")
+            continue
+        scenes.append(scene)
+        kept_polygons.append(polygon)
+    if not scenes:
+        raise RuntimeError("no AOI produced a usable scene (check LAS coverage)")
+    log.info(f"{len(scenes)}/{len(polygons)} AOI(s) ready; processing {len(image_paths)} image(s)")
+
+    results: list[RedactionResult] = []
+    for image_path, out_path in zip(image_paths, out_paths):
+        try:
+            res = _redact_one_image(
+                image_path, eo_path, kept_polygons, scenes, out_path,
+                pixelate_factor=pixelate_factor,
+                blur_sigma=blur_sigma,
+                rotation_convention=rotation_convention,
+            )
+        except Exception as e:   # noqa: BLE001 — one bad image shouldn't kill the batch
+            log.error(f"{image_path.name}: failed ({type(e).__name__}: {e}); skipping")
+            continue
+        if res is not None:
+            results.append(res)
+
+    log.info("=" * 60)
+    log.info(f"Batch complete: {len(results)}/{len(image_paths)} image(s) redacted")
+    log.info("=" * 60)
+    return results
+
+
 def redact_image(
     image_path: Path,
     polygon: Polygon,
@@ -293,60 +443,18 @@ def redact_image(
     blur_sigma: float = 8.0,
     rotation_convention: str | None = None,
 ) -> RedactionResult:
-    """End-to-end redaction. `polygon` is in EPSG:3011 (caller does the reprojection)."""
-    log.info("=" * 60)
-    log.info(f"Aerial redaction: {image_path.name}")
-    log.info(f"Polygon bounds (EPSG:3011): {polygon.bounds}")
-    log.info("=" * 60)
+    """End-to-end redaction of one image against one AOI. `polygon` is in EPSG:3011.
 
-    cam_kwargs = {} if rotation_convention is None else {"rotation_convention": rotation_convention}
-    with step("Build camera"):
-        camera = build_camera(image_path, eo_path, **cam_kwargs)
-
-    scene = build_scene(las_dir, polygon, voxel_size_m=voxel_size_m, buffer_m=buffer_m)
-
-    # z range from the LAS-derived mesh; the AOI's screen bbox should cover both
-    # base and roof projections
-    z_min = float(scene.mesh.vertices[:, 2].min())
-    z_max = float(scene.mesh.vertices[:, 2].max())
-    log.info(f"scene z range: [{z_min:.1f}, {z_max:.1f}] m (RH2000)")
-
-    with step("Compute image-space bbox"):
-        bbox_uv = aoi_screen_bbox(camera, polygon, z_min, z_max, pad_px=16)
-        u0, v0, u1, v1 = bbox_uv
-        log.info(f"  \u00b7 bbox = u[{u0}..{u1}] v[{v0}..{v1}] = {u1 - u0}\u00d7{v1 - v0} pixels")
-
-    mask = compute_mask(camera, scene, bbox_uv)
-    n_masked = int(mask.sum())
-    log.info(f"mask: {n_masked:,} pixels marked for redaction")
-
-    with step("Reading source image"):
-        with rasterio.open(image_path) as src:
-            arr = src.read()
-        image_np = np.transpose(arr, (1, 2, 0))   # → (H, W, bands)
-
-    redacted = apply_redaction(
-        image_np, mask, bbox_uv,
+    Thin wrapper over `redact_images`; raises if the AOI is not visible in the image.
+    """
+    results = redact_images(
+        [image_path], [out_path], [polygon], eo_path, las_dir,
+        voxel_size_m=voxel_size_m,
+        buffer_m=buffer_m,
         pixelate_factor=pixelate_factor,
         blur_sigma=blur_sigma,
+        rotation_convention=rotation_convention,
     )
-
-    write_geotiff(image_path, out_path, redacted)
-    mask_path = out_path.with_name(out_path.stem + "_mask.tif")
-    write_mask_tif(image_path, mask, mask_path)
-    debug_path = out_path.with_name(out_path.stem + "_debug.png")
-    write_debug_overlay(redacted, mask, bbox_uv, debug_path)
-
-    log.info("=" * 60)
-    log.info(f"Done. {out_path}")
-    log.info(f"     mask:  {mask_path}")
-    log.info(f"     debug: {debug_path}")
-    log.info("=" * 60)
-
-    return RedactionResult(
-        out_path=out_path,
-        mask_path=mask_path,
-        debug_path=debug_path,
-        n_pixels_masked=n_masked,
-        bbox_uv=bbox_uv,
-    )
+    if not results:
+        raise RuntimeError(f"AOI not visible in {image_path.name}")
+    return results[0]
