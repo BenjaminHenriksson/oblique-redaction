@@ -63,7 +63,7 @@ def _load_polygons_3011(geojson_path: Path) -> list[Polygon]:
                         f"expected Polygon features, got {poly_wgs84.geom_type} in {geojson_path}"
                     )
                 xs, ys = to_3011.transform(*poly_wgs84.exterior.xy)
-                polygons.append(Polygon(list(zip(xs, ys))))
+                polygons.append(Polygon(list(zip(xs, ys, strict=True))))
         if not polygons:
             raise ValueError(f"no polygon features found in {geojson_path}")
         log.info(f"  - {len(polygons)} AOI(s) reprojected to EPSG:3011")

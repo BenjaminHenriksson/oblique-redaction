@@ -22,15 +22,12 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-import shapely
 from PIL import Image, ImageDraw, ImageFilter
-from rasterio.windows import Window
 from shapely.geometry import Polygon
 
 from .camera import Camera, Intrinsics, build_camera, build_intrinsics_cache
 from .scene import SceneMesh, build_scene
 from .timing import log, step
-
 
 # ---------------------------------------------------------------------------
 # Public dataclass
@@ -294,7 +291,7 @@ def _redact_one_image(
     # Per-AOI screen bbox + mask. Each scene is independent (AOIs are not merged), so its
     # z-range and screen bbox stay tight to that one site.
     masks: list[tuple[np.ndarray, tuple[int, int, int, int]]] = []
-    for i, (polygon, scene) in enumerate(zip(polygons, scenes)):
+    for i, (polygon, scene) in enumerate(zip(polygons, scenes, strict=True)):
         z_min = float(scene.mesh.vertices[:, 2].min())
         z_max = float(scene.mesh.vertices[:, 2].max())
         try:
@@ -400,7 +397,7 @@ def redact_images(
         intrinsics_cache = build_intrinsics_cache(image_paths)
 
     results: list[RedactionResult] = []
-    for image_path, out_path in zip(image_paths, out_paths):
+    for image_path, out_path in zip(image_paths, out_paths, strict=True):
         try:
             res = _redact_one_image(
                 image_path, eo_path, kept_polygons, scenes, out_path,

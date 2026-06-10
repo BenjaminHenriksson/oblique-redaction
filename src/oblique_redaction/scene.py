@@ -20,9 +20,9 @@ on oblique frames.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import laspy
 import numpy as np
@@ -32,7 +32,6 @@ from scipy.spatial import Delaunay
 from shapely.geometry import Polygon
 
 from .timing import log, step
-
 
 # ---------------------------------------------------------------------------
 # Public dataclass

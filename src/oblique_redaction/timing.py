@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 _T0: float = 0.0  # set in init_logger; "wall + elapsed" formatting reads this
 
@@ -52,13 +51,13 @@ def init_logger(level: int = logging.INFO) -> None:
 class _Step:
     """Context manager that logs entry/exit and exposes a throttled progress tick."""
 
-    def __init__(self, name: str, total: Optional[int] = None):
+    def __init__(self, name: str, total: int | None = None):
         self.name = name
         self.total = total
         self.start: float = 0.0
         self._last_tick: float = 0.0
 
-    def __enter__(self) -> "_Step":
+    def __enter__(self) -> _Step:
         self.start = time.monotonic()
         self._last_tick = self.start
         suffix = f" (n={self.total:,})" if self.total else ""
@@ -92,5 +91,5 @@ class _Step:
             log.info(f"  · {self.name}: {done:,}{suffix}")
 
 
-def step(name: str, total: Optional[int] = None) -> _Step:
+def step(name: str, total: int | None = None) -> _Step:
     return _Step(name, total=total)
