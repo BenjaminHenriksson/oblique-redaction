@@ -1,222 +1,124 @@
 # oblique-redaction
 
-Redact (pixelate + Gaussian blur) sensitive sites in oblique and nadir aerial
-imagery, respecting occlusion by buildings, trees and walls.
+Blur out sensitive sites in aerial photos — correctly, even when buildings or
+trees stand in front of them.
 
-Given a 2D site polygon (WGS84) and an aerial image with exterior orientation
-(EO) data, the pipeline reconstructs the local 3D surface from airborne LiDAR,
-projects rays from the camera through every relevant pixel, and masks the
-pixels whose first surface hit lies inside the site footprint. The masked
-pixels are then pixelated and blurred. Pixels that are physically occluded
-(e.g. a building in front of the site) are correctly left untouched.
+You give it the outline of a place that should be hidden (drawn on a map) and an
+aerial photo of the area. It works out exactly which pixels in the photo show
+that place and blurs only those, leaving everything else untouched. Crucially,
+if a building or tree is *between* the camera and the site, those pixels are
+left alone — they aren't part of the site, so they shouldn't be blurred.
 
-Built and verified against the Vexcel UltraCam Osprey 4.1 oblique imagery of
-Stockholm/Kista (2021), flown by Terratec.
+It does this by rebuilding the 3D shape of the ground and buildings from laser
+scan (LiDAR) data, then tracing, for each pixel, what the camera was actually
+looking at.
 
-```
-   ┌─────────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐
-   │ AOI polygon │    │ aerial TIFF │    │ Terratec EO  │    │ LiDAR LAS   │
-   │  (WGS84)    │    │ (UltraCam)  │    │   text file  │    │ tiles (3011)│
-   └──────┬──────┘    └──────┬──────┘    └──────┬───────┘    └──────┬──────┘
-          │                  └──────┬───────────┘                   │
-          │                         ▼                               │
-          │                  ┌─────────────┐                        │
-          │                  │   Camera    │                        │
-          │                  │  (K, R, C)  │                        │
-          │                  └──────┬──────┘                        │
-          ▼                         │                               ▼
-   ┌─────────────┐                  │                  ┌──────────────────┐
-   │  Polygon    │                  │                  │  bbox + buffer   │
-   │ (EPSG:3011) │                  │                  │  → tile select   │
-   └──────┬──────┘                  │                  │  → stream + clip │
-          │                         │                  │  → max-z voxel   │
-          │                         │                  │  → 2D Delaunay   │
-          ├─────────────────────────┼─────────────────►│  → tag sensitive │
-          │                         │                  │  → Embree BVH    │
-          │                         │                  └────────┬─────────┘
-          │                         │                           ▼
-          │                         │                    ┌─────────────┐
-          │                         └───────────────────►│  raycast    │
-          │                                              │  in screen  │
-          │                                              │  bbox       │
-          │                                              └──────┬──────┘
-          │                                                     ▼
-          │                                              ┌─────────────┐
-          │                                              │  binary     │
-          │                                              │  mask       │
-          │                                              └──────┬──────┘
-          │                                                     ▼
-          │                                              ┌─────────────┐
-          │                                              │ pixelate +  │
-          │                                              │ blur inside │
-          │                                              │ mask        │
-          │                                              └──────┬──────┘
-          │                                                     ▼
-          │                                              ┌─────────────┐
-          │                                              │ redacted    │
-          │                                              │ GeoTIFF     │
-          │                                              └─────────────┘
-```
+Built and tested on Vexcel UltraCam Osprey oblique imagery of Stockholm/Kista
+(2021), flown by Terratec.
 
-## Quick start
+## Installing
+
+You need [`uv`](https://docs.astral.sh/uv/) (a Python tool). Once it's
+installed, from inside this folder run:
 
 ```bash
-# Install (uv handles everything)
 uv sync
+```
 
-# Verify the camera model on your data (HARD GATE — see below)
-uv run python tests/test_camera_sanity.py
+That downloads everything the tool needs. No other setup is required.
 
-# Redact one image against one polygon
-# (bring your own AOI polygon as a WGS84 GeoJSON; see docs/architecture.md for
-#  the expected inputs)
+## Using it
+
+Blur one site in one photo:
+
+```bash
 uv run oblique-redact \
-  --image   /path/to/image.tif \
+  --image   /path/to/photo.tif \
   --polygon /path/to/site.geojson \
   --eo      /path/to/EO.txt \
-  --las-dir /path/to/las_tiles/ \
-  --out     /tmp/redacted.tif
-
-# Redact a whole directory of images against many AOIs at once.
-# --image is a directory → every *.tif/*.tiff is processed; --out is a directory
-# (outputs are named <stem>_redacted.tif). --polygon may hold many features; each
-# is an independent AOI (they are NOT merged) and every AOI visible in an image is
-# redacted into that one output.
-uv run oblique-redact \
-  --image   /path/to/images_dir/ \
-  --polygon /path/to/sites.geojson \
-  --eo      /path/to/EO_total.txt \
-  --las-dir /path/to/las_tiles/ \
-  --out     /path/to/out_dir/
+  --las-dir /path/to/laser_scan_tiles/ \
+  --out     /tmp/blurred.tif
 ```
 
-Outputs (next to `--out`):
+You can also point `--image` at a *folder* of photos and `--polygon` at a file
+holding *several* sites — every photo is processed in turn, and every site that
+appears in a photo is blurred. In that case `--out` should be a folder; each
+result is saved as `<name>_redacted.tif`.
 
-- `redacted.tif` — the redacted GeoTIFF, source profile and tags preserved
-- `redacted_mask.tif` — single-band uint8 binary mask
-- `redacted_debug.png` — small overlay showing the bbox and the masked region
+```bash
+uv run oblique-redact \
+  --image   /path/to/photos_folder/ \
+  --polygon /path/to/sites.geojson \
+  --eo      /path/to/EO_total.txt \
+  --las-dir /path/to/laser_scan_tiles/ \
+  --out     /path/to/output_folder/
+```
 
-CLI options:
+### What you provide
 
-| Flag | Default | Notes |
+| Flag | What it is |
+|---|---|
+| `--image` | The aerial photo (a TIFF), or a folder of them |
+| `--polygon` | The site outline(s), as a GeoJSON map file in standard lat/long (WGS84) |
+| `--eo` | The camera orientation file that came with the imagery (Terratec EO) |
+| `--las-dir` | The folder of LiDAR laser-scan tiles for the area |
+| `--out` | Where to save the result — a file (single photo) or a folder (many photos) |
+
+### What you get
+
+Next to your `--out` path:
+
+- `blurred.tif` — the photo with the site(s) blurred, otherwise identical to the original
+- `blurred_debug.png` — a small preview image highlighting what was blurred, for a quick visual check
+
+### Optional settings
+
+These have sensible defaults; most people never need to change them.
+
+| Flag | Default | What it controls |
 |---|---|---|
-| `--image` | required | Source TIFF (UltraCam Lvl-3), **or a directory of TIFFs** to batch |
-| `--polygon` | required | AOI GeoJSON in WGS84; one or many features (each an independent AOI, not merged) |
-| `--eo` | required | Terratec EO file (`EO_total.txt` or per-camera) |
-| `--las-dir` | required | Directory of LAS tiles in EPSG:3011 |
-| `--out` | required | Output GeoTIFF path (single image) or output directory (image directory) |
-| `--voxel-size` | `1.0` | TIN xy voxel size in metres |
-| `--buffer` | `200.0` | LAS clip buffer around AOI in metres |
-| `--pixelate-factor` | `12` | Pixelate downsample factor inside the mask |
-| `--blur-sigma` | `8.0` | Gaussian blur sigma in pixels |
-| `--rotation-convention` | `xyz_intrinsic_T` | Override the camera rotation convention |
+| `--pixelate-factor` | `12` | How coarse the blur is (higher = blockier) |
+| `--blur-sigma` | `8.0` | How soft the blur edges are |
+| `--voxel-size` | `1.0` | Detail of the 3D surface, in metres |
+| `--buffer` | `200.0` | How far around the site to look for things that might block the view, in metres |
+| `--rotation-convention` | `xyz_intrinsic_T` | Advanced: how camera angles are interpreted (see below) |
 
-## Verification gate
+## Before trusting a new data source
 
-Before trusting the projection on a new EO source, run
+The tool was calibrated against the Terratec/Vexcel Stockholm imagery. If you
+bring imagery from a **different supplier or camera**, run the check first:
 
 ```bash
 uv run python tests/test_camera_sanity.py
 ```
 
-This projects ~100 building footprints from a Stockholm base map onto a
-downsampled image with **all four** candidate rotation conventions and saves
-side-by-side overlays in `/tmp/oblique_redaction_camera_check/`. Visual
-inspection picks the convention whose outlines line up with the visible
-buildings. The default in code (`xyz_intrinsic_T`) was chosen this way for
-Terratec/Vexcel data — a different EO source may need a different convention.
+This draws known building outlines onto a sample photo and saves preview images
+to `/tmp/oblique_redaction_camera_check/`. Look at them: if the outlines line up
+with the buildings, the camera setup is correct and you can trust the results.
+If they don't, the imagery uses a different angle convention and needs adjusting
+before use. See [docs/architecture.md](docs/architecture.md#4-camera-math--the-rotation-convention-is-empirical)
+for the details.
 
-See [docs/architecture.md](docs/architecture.md#camera-math-the-rotation-convention-is-empirical)
-for the full reasoning.
+## What it handles, and what it doesn't
 
-## Results on the Kista example
+Works well on:
 
-Three sensitive sites in the same Cam6L image (10560 × 14144 px, 462 MB),
-processed end-to-end on CPU:
+- High-altitude aerial imagery (the kind flown for regional mapping surveys)
+- Any UltraCam Lvl-3 oblique or nadir photo, with its matching orientation file
+- Flat-roofed and sloped buildings, trees, walls, and terrain
 
-| | Site 1 | Site 2 | Site 3 |
-|---|---:|---:|---:|
-| Tiles read | 4 | 2 | 2 |
-| Sensitive triangles | 16,774 | 16,700 | 2,120 |
-| Image-space bbox (px) | 1767×2361 | 1461×3046 | 989×2048 |
-| Mask pixels | 1,351,780 | 1,224,408 | 336,541 |
-| Total wall time | 6.52 s | 6.08 s | 4.57 s |
+Not handled yet (would need changes):
 
-The dominant cost is the per-image scene build (LAS clip + Delaunay), not the
-raycasting itself: Embree handles ~6 M rays/s on CPU and the per-AOI ray budget
-is well under 5 M. See [docs/scaling-and-future.md](docs/scaling-and-future.md)
-for how this scales (and doesn't) at city level.
+- **Overhanging structures** — bridges, balconies, rooftop cantilevers. The 3D
+  surface is a "height map", so it can't represent something sticking out over
+  empty space beneath it. Rare in central Stockholm.
+- **Other camera types** that aren't pre-corrected for lens distortion (most
+  drone and consumer cameras). UltraCam imagery is already corrected.
+- **Very low-altitude flights** (low drone, near-horizontal). The view-blocking
+  search is tuned for high-altitude imagery.
 
-## Documentation
+## How it works
 
-- **[docs/architecture.md](docs/architecture.md)** — pipeline walkthrough, data
-  flow, key algorithms, and the camera math + rotation-convention story.
-- **[docs/scaling-and-future.md](docs/scaling-and-future.md)** — what
-  generalises to future imagery deliveries, what doesn't, and what to change to
-  process the entire Stockholm region instead of single images.
-
-## Layout
-
-```
-oblique-redaction/
-├── pyproject.toml
-├── README.md                              # this file
-├── docs/
-│   ├── architecture.md
-│   └── scaling-and-future.md
-├── src/oblique_redaction/
-│   ├── __init__.py                        # re-exports
-│   ├── timing.py                          # logger, step() ctx, throttled progress
-│   ├── camera.py                          # EO + intrinsics → Camera (project + ray)
-│   ├── scene.py                           # LAS → TIN + Embree raycaster
-│   ├── redact.py                          # mask → pixelate+blur → GeoTIFF I/O
-│   └── cli.py                             # `oblique-redact` entrypoint
-└── tests/
-    └── test_camera_sanity.py              # rotation-convention verification (HARD GATE)
-```
-
-## Dependencies
-
-| Package | Why |
-|---|---|
-| `numpy`, `scipy` | Array math + 2D Delaunay |
-| `pyproj` | WGS84 → EPSG:3011 reprojection |
-| `shapely` | Polygon ops + vectorised `contains_xy` |
-| `rasterio` | Source TIFF read, GeoTIFF write |
-| `tifffile` | Parse the UltraCam `ImageDescription` tag |
-| `pillow` | Pixelate + Gaussian blur composite |
-| `laspy[lazrs]` | Streamed LAS/LAZ reading |
-| `trimesh` | Mesh container + ray API |
-| `embreex` | Intel Embree CPU raytracing wheel for trimesh |
-| `pyogrio` | GeoPackage reading (used by the camera-sanity test only) |
-
-All managed via `uv`. No GDAL CLI / no system PDAL required.
-
-## Status and limits
-
-This is **v1**. It works correctly on Vexcel UltraCam Osprey Cam6L oblique
-imagery from Stockholm/Kista 2021, processed with Terratec TerraPos EO. It's
-deliberately not over-engineered for cases not yet observed:
-
-- **Batch is a simple loop, not a scheduler.** Point `--image` at a directory to
-  process every TIFF, and `--polygon` may carry many AOIs. One scene (LiDAR clip +
-  TIN) is built per AOI and reused across all images; AOIs are kept separate (never
-  merged into one giant footprint), images are processed one at a time, and an image
-  with no visible AOI is skipped. It does **not** yet pre-filter which images see
-  which AOI (every image is opened and its camera built) — fine for dozens to a few
-  hundred images, see [docs/scaling-and-future.md](docs/scaling-and-future.md) for
-  the city-scale plan.
-- **No lens distortion correction.** UltraCam is a metric camera and the Lvl-3
-  product is corrected upstream. Other cameras will likely need a Brown-Conrady
-  distortion model added.
-- **Rotation convention is empirical** for the Terratec data. New surveyors /
-  software → re-run the verification gate before trusting the output.
-- **2.5D height-field mesh, no overhangs.** Central Stockholm rarely has them;
-  bridges, balconies, and rooftop cantilevers are the failure cases.
-- **Buffer-based LAS clip, no line-of-sight cone.** Calibrated for ~1850 m AGL
-  cameras; lower-altitude flights may need a cone clip — see
-  [docs/scaling-and-future.md](docs/scaling-and-future.md#low-altitude-cameras).
-- **Per-query LAS read.** Reads tiles on every invocation. Fine for dozens of
-  AOIs, breaks down at city scale — see
-  [docs/scaling-and-future.md](docs/scaling-and-future.md#what-changes-at-city-scale)
-  for the COPC + caching plan.
+See **[docs/architecture.md](docs/architecture.md)** for the full technical
+walkthrough — the camera maths, the 3D surface reconstruction, and the
+pixel-tracing that decides what to blur.
