@@ -43,6 +43,15 @@ from .timing import log
 # Data classes
 # ---------------------------------------------------------------------------
 
+class MissingImageDescription(Exception):
+    """The TIFF page has no ImageDescription tag, so intrinsics aren't embedded.
+
+    Raised by `parse_intrinsics_from_tiff` so callers can distinguish "intrinsics
+    not present in this file" (recoverable from a sibling image of the same camera)
+    from a genuinely corrupt/unreadable file.
+    """
+
+
 @dataclass
 class Intrinsics:
     f_px: float        # focal length in pixels
@@ -115,7 +124,12 @@ def parse_intrinsics_from_tiff(tiff_path: Path) -> Intrinsics:
     with tifffile.TiffFile(tiff_path) as tif:
         page = tif.pages[0]
         H, W = page.shape[:2]
-        desc = page.tags["ImageDescription"].value
+        tag = page.tags.get("ImageDescription")
+        if tag is None:
+            raise MissingImageDescription(
+                f"{tiff_path.name}: no ImageDescription tag (intrinsics not embedded)"
+            )
+        desc = tag.value
 
     def grab(key: str) -> float:
         m = re.search(rf"{re.escape(key)}:\s*([-\d.]+)", desc)
@@ -229,9 +243,110 @@ PHOTO_TO_CV = np.diag([1.0, -1.0, -1.0])
 # Top-level builder
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Per-camera intrinsics cache
+#
+# Intrinsics (focal length, principal point, sensor size) are a property of the
+# camera HEAD, fixed across an entire flight — unlike extrinsics, which are
+# per-exposure. So when a TIFF is missing its ImageDescription tag, we can recover
+# its intrinsics from any sibling image of the same camera that *did* keep the tag.
+# The camera is identified by the `CamXX` token in the filename
+# (e.g. `12345_07_67890_Cam0N.tif`).
+# ---------------------------------------------------------------------------
+
+_CAM_RE = re.compile(r"Cam[0-9A-Za-z]{2}")
+
+
+def camera_key_from_path(path: Path) -> str | None:
+    """Extract the `CamXX` camera token from a filename like `XXXXX_XX_XXXXX_CamXX.tif`."""
+    m = _CAM_RE.search(path.stem)
+    return m.group(0) if m else None
+
+
+def _fmt_intrinsics(i: Intrinsics) -> str:
+    return f"f={i.f_px:.3f}px pp=({i.u_pp:.3f},{i.v_pp:.3f}) {i.width}x{i.height}"
+
+
+def _intrinsics_agree(a: Intrinsics, b: Intrinsics, *, tol: float = 1e-3) -> bool:
+    """True when two intrinsics describe the same camera (sub-pixel tolerance on floats)."""
+    return (
+        a.width == b.width
+        and a.height == b.height
+        and abs(a.f_px - b.f_px) <= tol
+        and abs(a.u_pp - b.u_pp) <= tol
+        and abs(a.v_pp - b.v_pp) <= tol
+    )
+
+
+def build_intrinsics_cache(image_paths: list[Path]) -> dict[str, Intrinsics]:
+    """Pre-pass over a batch: collect intrinsics per camera from images that kept their
+    ImageDescription tag, returning one trusted `Intrinsics` per `CamXX` key.
+
+    Consistency gate: every readable instance of a given camera must agree (intrinsics
+    are a per-head constant). If they disagree — different sensors sharing a token, or
+    corrupt tags — the camera is EXCLUDED from the cache and logged at error level, so
+    we never silently guess wrong intrinsics. Cameras for which no image carried the tag
+    are simply absent (their missing-tag images will fail individually, as before).
+    """
+    parsed: dict[str, list[tuple[str, Intrinsics]]] = {}
+    for p in image_paths:
+        key = camera_key_from_path(p)
+        if key is None:
+            log.warning(f"{p.name}: no CamXX token in filename; cannot cache its intrinsics")
+            continue
+        try:
+            intr = parse_intrinsics_from_tiff(p)
+        except MissingImageDescription:
+            continue  # exactly the images we want to *repair*; skip in the pre-pass
+        except Exception as e:  # noqa: BLE001 — a corrupt file must not kill the pre-pass
+            log.warning(f"{p.name}: intrinsics pre-pass read failed ({type(e).__name__}: {e})")
+            continue
+        parsed.setdefault(key, []).append((p.name, intr))
+
+    cache: dict[str, Intrinsics] = {}
+    for key, items in parsed.items():
+        ref_name, ref = items[0]
+        conflicts = [(n, i) for n, i in items[1:] if not _intrinsics_agree(ref, i)]
+        if conflicts:
+            log.error(
+                f"intrinsics cache [{key}]: DISAGREEMENT across {len(items)} image(s) — "
+                f"refusing to cache/guess for this camera. ref {ref_name}: {_fmt_intrinsics(ref)}"
+            )
+            for n, i in conflicts:
+                log.error(f"  conflict {n}: {_fmt_intrinsics(i)}")
+            continue
+        cache[key] = ref
+        log.info(
+            f"intrinsics cache [{key}]: verified identical across {len(items)} image(s) "
+            f"(source {ref_name}) {_fmt_intrinsics(ref)}"
+        )
+    return cache
+
+
+def _resolve_cached_intrinsics(
+    tiff_path: Path, cache: dict[str, Intrinsics] | None
+) -> Intrinsics:
+    """Look up borrowed intrinsics for a tag-less TIFF; re-raise if unavailable."""
+    key = camera_key_from_path(tiff_path)
+    if cache is not None and key is not None and key in cache:
+        log.warning(
+            f"{tiff_path.name}: ImageDescription missing; using cached intrinsics "
+            f"for camera {key}"
+        )
+        return cache[key]
+    raise MissingImageDescription(
+        f"{tiff_path.name}: ImageDescription missing and no cached intrinsics for camera "
+        f"{key or '?'} (no sibling image of this camera carried the tag)"
+    )
+
+
 def build_camera(tiff_path: Path, eo_path: Path,
-                 rotation_convention: str = DEFAULT_ROTATION_CONVENTION) -> Camera:
-    intr = parse_intrinsics_from_tiff(tiff_path)
+                 rotation_convention: str = DEFAULT_ROTATION_CONVENTION,
+                 intrinsics_cache: dict[str, Intrinsics] | None = None) -> Camera:
+    try:
+        intr = parse_intrinsics_from_tiff(tiff_path)
+    except MissingImageDescription:
+        intr = _resolve_cached_intrinsics(tiff_path, intrinsics_cache)
     eo = parse_eo_row(eo_path, tiff_path.stem)
 
     R_w_to_photo = world_to_photo_rotation(eo.omega, eo.phi, eo.kappa, rotation_convention)

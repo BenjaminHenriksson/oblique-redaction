@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from rasterio.windows import Window
 from shapely.geometry import Polygon
 
-from .camera import Camera, build_camera
+from .camera import Camera, Intrinsics, build_camera, build_intrinsics_cache
 from .scene import SceneMesh, build_scene
 from .timing import log, step
 
@@ -39,7 +39,7 @@ from .timing import log, step
 @dataclass
 class RedactionResult:
     out_path: Path
-    mask_path: Path
+    mask_path: Path | None        # None — standalone mask TIFFs are no longer written
     debug_path: Path
     n_pixels_masked: int
     bbox_uv: tuple[int, int, int, int]   # (u0, v0, u1, v1) in source pixels
@@ -212,21 +212,6 @@ def write_geotiff(
                     dst.update_tags(b, **t)
 
 
-def write_mask_tif(
-    src_path: Path,
-    mask: np.ndarray,
-    out_path: Path,
-) -> None:
-    with step(f"Writing mask TIFF → {out_path}"):
-        with rasterio.open(src_path) as src:
-            profile = src.profile.copy()
-        profile.update(count=1, dtype=rasterio.uint8, photometric="minisblack",
-                       nodata=None)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(out_path, "w", **profile) as dst:
-            dst.write(mask[None, ...])
-
-
 def write_debug_overlay(
     image_np: np.ndarray,
     mask: np.ndarray,
@@ -290,6 +275,7 @@ def _redact_one_image(
     pixelate_factor: int = 12,
     blur_sigma: float = 8.0,
     rotation_convention: str | None = None,
+    intrinsics_cache: dict[str, Intrinsics] | None = None,
 ) -> RedactionResult | None:
     """Redact every AOI that is visible in one image, writing a single output.
 
@@ -303,7 +289,7 @@ def _redact_one_image(
 
     cam_kwargs = {} if rotation_convention is None else {"rotation_convention": rotation_convention}
     with step("Build camera"):
-        camera = build_camera(image_path, eo_path, **cam_kwargs)
+        camera = build_camera(image_path, eo_path, intrinsics_cache=intrinsics_cache, **cam_kwargs)
 
     # Per-AOI screen bbox + mask. Each scene is independent (AOIs are not merged), so its
     # z-range and screen bbox stay tight to that one site.
@@ -352,15 +338,13 @@ def _redact_one_image(
     )
 
     write_geotiff(image_path, out_path, image_np)
-    mask_path = out_path.with_name(out_path.stem + "_mask.tif")
-    write_mask_tif(image_path, combined, mask_path)
     debug_path = out_path.with_name(out_path.stem + "_debug.png")
     write_debug_overlay(image_np, combined, union_bbox, debug_path)
 
-    log.info(f"Done. {out_path}  (mask: {mask_path}, debug: {debug_path})")
+    log.info(f"Done. {out_path}  (debug: {debug_path})")
     return RedactionResult(
         out_path=out_path,
-        mask_path=mask_path,
+        mask_path=None,
         debug_path=debug_path,
         n_pixels_masked=n_masked,
         bbox_uv=union_bbox,
@@ -409,6 +393,12 @@ def redact_images(
         raise RuntimeError("no AOI produced a usable scene (check LAS coverage)")
     log.info(f"{len(scenes)}/{len(polygons)} AOI(s) ready; processing {len(image_paths)} image(s)")
 
+    # Per-camera intrinsics fallback: some TIFFs are missing their ImageDescription tag.
+    # Recover those from a sibling image of the same camera (intrinsics are a per-head
+    # constant). build_intrinsics_cache also verifies agreement across each camera's images.
+    with step("Build intrinsics cache"):
+        intrinsics_cache = build_intrinsics_cache(image_paths)
+
     results: list[RedactionResult] = []
     for image_path, out_path in zip(image_paths, out_paths):
         try:
@@ -417,6 +407,7 @@ def redact_images(
                 pixelate_factor=pixelate_factor,
                 blur_sigma=blur_sigma,
                 rotation_convention=rotation_convention,
+                intrinsics_cache=intrinsics_cache,
             )
         except Exception as e:   # noqa: BLE001 — one bad image shouldn't kill the batch
             log.error(f"{image_path.name}: failed ({type(e).__name__}: {e}); skipping")
